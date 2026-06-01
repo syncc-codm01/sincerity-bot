@@ -30,6 +30,7 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildPresences,
   ],
 });
 
@@ -57,6 +58,17 @@ client.once(Events.ClientReady, (c) => {
   console.log(`[Sincerity Bot] Logged in as ${c.user.tag}`);
   registerCommands(c.user.id);
   scheduleKickChecks();
+});
+
+client.on(Events.GuildMemberAdd, (member) => {
+  if (member.roles.cache.has(ROLE_VERIFIED)) return;
+
+  const data = loadData();
+  if (!data[member.id]) {
+    data[member.id] = Date.now();
+    saveData(data);
+    console.log(`[Join] Started 3-day verification timer for ${member.user.tag}`);
+  }
 });
 
 client.on(Events.MessageCreate, async (message) => {
@@ -110,9 +122,13 @@ client.on(Events.MessageCreate, async (message) => {
     console.log(`[Roles] Added roles to ${member.user.tag}: ${rolesToAdd.join(', ')}`);
 
     const data = loadData();
-    data[mentionedUserId] = Date.now();
+    if (!data[mentionedUserId]) {
+      data[mentionedUserId] = Date.now();
+      console.log(`[Timer] Started 3-day kick timer for ${member.user.tag}`);
+    } else {
+      console.log(`[Timer] Timer already running for ${member.user.tag} (started on join)`);
+    }
     saveData(data);
-    console.log(`[Timer] Started 3-day kick timer for ${member.user.tag}`);
   } catch (err) {
     console.error(`[Error] Failed to add roles to ${member.user.tag}:`, err.message);
   }
@@ -125,14 +141,15 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
 
   if (!gainedVerified) return;
 
+  const data = loadData();
+  delete data[newMember.id];
+  saveData(data);
+  console.log(`[Verified] Cancelled kick timer for ${newMember.user.tag}`);
+
   if (newMember.roles.cache.has(ROLE_UNVERIFIED)) {
     try {
       await newMember.roles.remove(ROLE_UNVERIFIED, 'Member verified — removing unverified role');
       console.log(`[Verified] Removed unverified role from ${newMember.user.tag}`);
-
-      const data = loadData();
-      delete data[newMember.id];
-      saveData(data);
     } catch (err) {
       console.error(`[Error] Failed to remove unverified role from ${newMember.user.tag}:`, err.message);
     }
@@ -232,15 +249,15 @@ async function checkAndKick() {
         continue;
       }
 
-      if (!member.roles.cache.has(ROLE_UNVERIFIED)) {
+      if (member.roles.cache.has(ROLE_VERIFIED)) {
         delete data[userId];
         changed = true;
-        console.log(`[Kick Check] ${member.user.tag} no longer has unverified role — removing from tracker`);
+        console.log(`[Kick Check] ${member.user.tag} is verified — removing from tracker`);
         continue;
       }
 
       try {
-        await member.kick('Still has unverified role after 3 days');
+        await member.kick('Did not complete verification within 3 days');
         console.log(`[Kick] Kicked ${member.user.tag} for not completing verification within 3 days`);
       } catch (err) {
         console.error(`[Error] Failed to kick ${member.user.tag}:`, err.message);

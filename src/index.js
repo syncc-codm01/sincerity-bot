@@ -3,13 +3,14 @@ const fs = require('fs');
 const path = require('path');
 
 const FORM_CHANNEL_ID = '1509951821903302797';
+const COUNTDOWN_CHANNEL_ID = '1510824786115297300';
 const ROLE_CODM = '1510537801144467586';
 const ROLE_TIKTOK = '1510537918333325382';
 const ROLE_UNVERIFIED = '1510537467814740038';
 const ROLE_VERIFIED = '1509947656149925948';
 
 const DATA_FILE = path.join(__dirname, '..', 'data', 'unverified.json');
-const KICK_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
+const KICK_AFTER_MS = 10 * 1000;
 
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) return {};
@@ -21,7 +22,40 @@ function loadData() {
 }
 
 function saveData(data) {
+  const dir = path.dirname(DATA_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+function formatTimeRemaining(ms) {
+  if (ms <= 0) return '⚠️ Overdue';
+  const totalSec = Math.floor(ms / 1000);
+  const days = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const parts = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (mins > 0 || parts.length === 0) parts.push(`${mins}m`);
+  return parts.join(' ');
+}
+
+function buildCountdownEmbed(member, joinedAt) {
+  const remaining = KICK_AFTER_MS - (Date.now() - joinedAt);
+  const kickTime = Math.floor((joinedAt + KICK_AFTER_MS) / 1000);
+  const color = remaining < 24 * 60 * 60 * 1000 ? 0xFF0000 : 0xFFA500;
+
+  return new EmbedBuilder()
+    .setTitle('⏳ Pending Verification')
+    .setDescription(
+      `**${member.user.tag}** joined the server and has not yet been verified.\n\n` +
+      `They will be automatically kicked <t:${kickTime}:R> if not verified.\n\n` +
+      `**Time remaining:** ${formatTimeRemaining(remaining)}`
+    )
+    .setThumbnail(member.user.displayAvatarURL())
+    .setColor(color)
+    .setFooter({ text: `User ID: ${member.id}` })
+    .setTimestamp();
 }
 
 const client = new Client({
@@ -53,20 +87,51 @@ async function registerCommands(clientId) {
   }
 }
 
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, async (c) => {
   console.log(`[Sincerity Bot] Logged in as ${c.user.tag}`);
   registerCommands(c.user.id);
   scheduleKickChecks();
+  startCountdownUpdater();
 });
 
-client.on(Events.GuildMemberAdd, (member) => {
+client.on(Events.GuildMemberAdd, async (member) => {
   if (member.roles.cache.has(ROLE_VERIFIED)) return;
 
   const data = loadData();
-  if (!data[member.id]) {
-    data[member.id] = Date.now();
+  if (data[member.id]) return;
+
+  const joinedAt = Date.now();
+  data[member.id] = { joinedAt, messageId: null };
+  saveData(data);
+  console.log(`[Join] Started verification timer for ${member.user.tag}`);
+
+  try {
+    await member.send({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('👋 Welcome to the server!')
+          .setDescription(
+            `Hey **${member.user.username}**! Welcome!\n\n` +
+            `Please complete the verification form to gain access.\n\n` +
+            `⚠️ **You will be automatically kicked in 3 days if you are not verified.**`
+          )
+          .setColor(0xFFA500)
+          .setTimestamp()
+      ]
+    });
+    console.log(`[DM] Sent welcome/warning DM to ${member.user.tag}`);
+  } catch {
+    console.log(`[DM] Could not DM ${member.user.tag} (DMs likely closed)`);
+  }
+
+  try {
+    const channel = await client.channels.fetch(COUNTDOWN_CHANNEL_ID);
+    const msg = await channel.send({ embeds: [buildCountdownEmbed(member, joinedAt)] });
+    data[member.id].messageId = msg.id;
     saveData(data);
-    console.log(`[Join] Started 3-day verification timer for ${member.user.tag}`);
+    console.log(`[Countdown] Posted countdown for ${member.user.tag}`);
+  } catch (err) {
+    console.error(`[Countdown] Failed to post countdown for ${member.user.tag}:`, err.message);
   }
 });
 
@@ -103,7 +168,6 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   const rolesToAdd = [ROLE_UNVERIFIED];
-
   const saidYesToCodm = /codm[\s\S]{0,30}yes|yes[\s\S]{0,30}codm/i.test(fullText);
   const saidYesToTiktok = /tiktok[\s\S]{0,30}yes|yes[\s\S]{0,30}tiktok/i.test(fullText);
 
@@ -132,9 +196,21 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   if (!gainedVerified) return;
 
   const data = loadData();
+  const entry = data[newMember.id];
   delete data[newMember.id];
   saveData(data);
   console.log(`[Verified] Cancelled kick timer for ${newMember.user.tag}`);
+
+  if (entry?.messageId) {
+    try {
+      const channel = await client.channels.fetch(COUNTDOWN_CHANNEL_ID);
+      const msg = await channel.messages.fetch(entry.messageId);
+      await msg.delete();
+      console.log(`[Countdown] Deleted countdown message for ${newMember.user.tag}`);
+    } catch {
+      console.log(`[Countdown] Could not delete countdown message for ${newMember.user.tag}`);
+    }
+  }
 
   if (newMember.roles.cache.has(ROLE_UNVERIFIED)) {
     try {
@@ -163,21 +239,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
   const guild = interaction.guild;
   const lines = [];
 
-  for (const [userId, timestamp] of entries) {
-    const elapsed = now - timestamp;
-    const remaining = KICK_AFTER_MS - elapsed;
+  for (const [userId, entry] of entries) {
+    const joinedAt = entry?.joinedAt ?? entry;
+    const remaining = KICK_AFTER_MS - (now - joinedAt);
+    const kickTime = Math.floor((joinedAt + KICK_AFTER_MS) / 1000);
 
-    let label;
-    if (remaining <= 0) {
-      label = '⚠️ **Overdue** (pending kick)';
-    } else {
-      const hours = Math.floor(remaining / (1000 * 60 * 60));
-      const days = Math.floor(hours / 24);
-      const hrs = hours % 24;
-      label = days > 0 ? `${days}d ${hrs}h remaining` : `${hrs}h remaining`;
-    }
+    const label = remaining <= 0
+      ? '⚠️ **Overdue** (pending kick)'
+      : `kicks <t:${kickTime}:R>`;
 
-    let display = `<@${userId}>`;
+    let display;
     try {
       const member = await guild.members.fetch(userId);
       display = `**${member.user.tag}** (<@${userId}>)`;
@@ -217,7 +288,46 @@ function extractMentionedUserId(message) {
 
 function scheduleKickChecks() {
   checkAndKick();
-  setInterval(checkAndKick, 60 * 60 * 1000);
+  setInterval(checkAndKick, 5 * 1000);
+}
+
+function startCountdownUpdater() {
+  setInterval(updateCountdowns, 60 * 1000);
+}
+
+async function updateCountdowns() {
+  const data = loadData();
+  const entries = Object.entries(data);
+  if (entries.length === 0) return;
+
+  let channel;
+  try {
+    channel = await client.channels.fetch(COUNTDOWN_CHANNEL_ID);
+  } catch {
+    return;
+  }
+
+  for (const [userId, entry] of entries) {
+    const joinedAt = entry?.joinedAt ?? entry;
+    const messageId = entry?.messageId;
+    if (!messageId) continue;
+
+    for (const [, guild] of client.guilds.cache) {
+      let member;
+      try {
+        member = await guild.members.fetch(userId);
+      } catch {
+        continue;
+      }
+
+      try {
+        const msg = await channel.messages.fetch(messageId);
+        await msg.edit({ embeds: [buildCountdownEmbed(member, joinedAt)] });
+      } catch {
+        console.log(`[Countdown] Could not update countdown for ${member.user.tag}`);
+      }
+    }
+  }
 }
 
 async function checkAndKick() {
@@ -225,8 +335,10 @@ async function checkAndKick() {
   const now = Date.now();
   let changed = false;
 
-  for (const [userId, timestamp] of Object.entries(data)) {
-    const elapsed = now - timestamp;
+  for (const [userId, entry] of Object.entries(data)) {
+    const joinedAt = entry?.joinedAt ?? entry;
+    const messageId = entry?.messageId;
+    const elapsed = now - joinedAt;
     if (elapsed < KICK_AFTER_MS) continue;
 
     for (const [, guild] of client.guilds.cache) {
@@ -236,6 +348,7 @@ async function checkAndKick() {
       } catch {
         delete data[userId];
         changed = true;
+        if (messageId) deleteCountdownMessage(messageId);
         continue;
       }
 
@@ -243,22 +356,50 @@ async function checkAndKick() {
         delete data[userId];
         changed = true;
         console.log(`[Kick Check] ${member.user.tag} is verified — removing from tracker`);
+        if (messageId) deleteCountdownMessage(messageId);
         continue;
       }
 
       try {
-        await member.kick('Did not complete verification within 3 days');
-        console.log(`[Kick] Kicked ${member.user.tag} for not completing verification within 3 days`);
+        await member.send({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle('❌ You have been kicked')
+              .setDescription(
+                `You were kicked from **${guild.name}** for not completing verification within the required time.\n\n` +
+                `You are welcome to rejoin and complete the verification form.`
+              )
+              .setColor(0xFF0000)
+              .setTimestamp()
+          ]
+        });
+      } catch {
+        console.log(`[DM] Could not send kick DM to ${member.user.tag}`);
+      }
+
+      try {
+        await member.kick('Did not complete verification within the required time');
+        console.log(`[Kick] Kicked ${member.user.tag}`);
       } catch (err) {
         console.error(`[Error] Failed to kick ${member.user.tag}:`, err.message);
       }
 
+      if (messageId) deleteCountdownMessage(messageId);
       delete data[userId];
       changed = true;
     }
   }
 
   if (changed) saveData(data);
+}
+
+async function deleteCountdownMessage(messageId) {
+  try {
+    const channel = await client.channels.fetch(COUNTDOWN_CHANNEL_ID);
+    const msg = await channel.messages.fetch(messageId);
+    await msg.delete();
+  } catch {
+  }
 }
 
 client.login(process.env.DISCORD_TOKEN);

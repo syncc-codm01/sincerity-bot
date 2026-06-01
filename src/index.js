@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Events, AuditLogEvent } = require('discord.js');
+const { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 
@@ -33,8 +33,27 @@ const client = new Client({
   ],
 });
 
+const commands = [
+  new SlashCommandBuilder()
+    .setName('status')
+    .setDescription('Show members currently in the unverified queue and their time remaining')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+    .toJSON(),
+];
+
+async function registerCommands(clientId) {
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+  try {
+    await rest.put(Routes.applicationCommands(clientId), { body: commands });
+    console.log('[Commands] Slash commands registered globally');
+  } catch (err) {
+    console.error('[Commands] Failed to register slash commands:', err.message);
+  }
+}
+
 client.once(Events.ClientReady, (c) => {
   console.log(`[Sincerity Bot] Logged in as ${c.user.tag}`);
+  registerCommands(c.user.id);
   scheduleKickChecks();
 });
 
@@ -116,6 +135,58 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
       console.error(`[Error] Failed to remove unverified role from ${newMember.user.tag}:`, err.message);
     }
   }
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== 'status') return;
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const data = loadData();
+  const now = Date.now();
+  const entries = Object.entries(data);
+
+  if (entries.length === 0) {
+    return interaction.editReply({ content: '✅ No members are currently in the unverified queue.' });
+  }
+
+  const guild = interaction.guild;
+  const lines = [];
+
+  for (const [userId, timestamp] of entries) {
+    const elapsed = now - timestamp;
+    const remaining = KICK_AFTER_MS - elapsed;
+
+    let label;
+    if (remaining <= 0) {
+      label = '⚠️ **Overdue** (pending kick)';
+    } else {
+      const hours = Math.floor(remaining / (1000 * 60 * 60));
+      const days = Math.floor(hours / 24);
+      const hrs = hours % 24;
+      label = days > 0 ? `${days}d ${hrs}h remaining` : `${hrs}h remaining`;
+    }
+
+    let display = `<@${userId}>`;
+    try {
+      const member = await guild.members.fetch(userId);
+      display = `**${member.user.tag}** (<@${userId}>)`;
+    } catch {
+      display = `Unknown user (<@${userId}>)`;
+    }
+
+    lines.push(`• ${display} — ${label}`);
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle('🔒 Unverified Queue')
+    .setDescription(lines.join('\n'))
+    .setColor(0xF04747)
+    .setFooter({ text: `${entries.length} member${entries.length !== 1 ? 's' : ''} pending verification` })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
 });
 
 function extractMentionedUserId(message) {

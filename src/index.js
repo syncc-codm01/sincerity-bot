@@ -43,11 +43,13 @@ const commands = [
 
 async function registerCommands(clientId) {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-  try {
-    await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    console.log('[Commands] Slash commands registered globally');
-  } catch (err) {
-    console.error('[Commands] Failed to register slash commands:', err.message);
+  for (const [guildId] of client.guilds.cache) {
+    try {
+      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+      console.log(`[Commands] Slash commands registered for guild ${guildId}`);
+    } catch (err) {
+      console.error(`[Commands] Failed to register commands for guild ${guildId}:`, err.message);
+    }
   }
 }
 

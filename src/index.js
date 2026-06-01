@@ -126,11 +126,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
 
   try {
     const channel = await client.channels.fetch(COUNTDOWN_CHANNEL_ID);
-    const verifiedMembers = member.guild.members.cache
-  .filter(m => !m.user.bot && m.roles.cache.has(ROLE_VERIFIED))
-  .map(m => `<@${m.id}>`)
-  .join(' ');
-const msg = await channel.send({ content: `<@${member.id}> ${verifiedMembers}`, embeds: [buildCountdownEmbed(member, joinedAt)] });
+const msg = await channel.send({ embeds: [buildCountdownEmbed(member, joinedAt)] });
     data[member.id].messageId = msg.id;
     saveData(data);
     console.log(`[Countdown] Posted countdown for ${member.user.tag}`);

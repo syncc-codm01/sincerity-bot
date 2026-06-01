@@ -119,15 +119,6 @@ client.on(Events.MessageCreate, async (message) => {
   try {
     await member.roles.add(rolesToAdd, 'Form submission role assignment');
     console.log(`[Roles] Added roles to ${member.user.tag}: ${rolesToAdd.join(', ')}`);
-
-    const data = loadData();
-    if (!data[mentionedUserId]) {
-      data[mentionedUserId] = Date.now();
-      console.log(`[Timer] Started 3-day kick timer for ${member.user.tag}`);
-    } else {
-      console.log(`[Timer] Timer already running for ${member.user.tag} (started on join)`);
-    }
-    saveData(data);
   } catch (err) {
     console.error(`[Error] Failed to add roles to ${member.user.tag}:`, err.message);
   }

@@ -1,0 +1,184 @@
+const { Client, GatewayIntentBits, Events, AuditLogEvent } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
+
+const FORM_CHANNEL_ID = '1509951821903302797';
+const ROLE_CODM = '1510537801144467586';
+const ROLE_TIKTOK = '1510537918333325382';
+const ROLE_UNVERIFIED = '1510537467814740038';
+const ROLE_VERIFIED = '1509947656149925948';
+
+const DATA_FILE = path.join(__dirname, '..', 'data', 'unverified.json');
+const KICK_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
+
+function loadData() {
+  if (!fs.existsSync(DATA_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveData(data) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
+
+client.once(Events.ClientReady, (c) => {
+  console.log(`[Sincerity Bot] Logged in as ${c.user.tag}`);
+  scheduleKickChecks();
+});
+
+client.on(Events.MessageCreate, async (message) => {
+  if (message.channelId !== FORM_CHANNEL_ID) return;
+  if (!message.author.bot) return;
+
+  console.log(`[Form] Received bot message in form channel from ${message.author.tag}`);
+
+  const content = message.content.toLowerCase();
+  const embeds = message.embeds;
+
+  let fullText = content;
+  for (const embed of embeds) {
+    if (embed.description) fullText += '\n' + embed.description.toLowerCase();
+    for (const field of embed.fields || []) {
+      fullText += '\n' + field.name.toLowerCase() + '\n' + field.value.toLowerCase();
+    }
+  }
+
+  const mentionedUserId = extractMentionedUserId(message);
+  if (!mentionedUserId) {
+    console.log('[Form] Could not find a mentioned user in the form message. Skipping.');
+    return;
+  }
+
+  const guild = message.guild;
+  let member;
+  try {
+    member = await guild.members.fetch(mentionedUserId);
+  } catch {
+    console.log(`[Form] Could not fetch member ${mentionedUserId}`);
+    return;
+  }
+
+  const rolesToAdd = [ROLE_UNVERIFIED];
+
+  const saidYesToCodm = /codm[\s\S]{0,30}yes|yes[\s\S]{0,30}codm/i.test(fullText);
+  const saidYesToTiktok = /tiktok[\s\S]{0,30}yes|yes[\s\S]{0,30}tiktok/i.test(fullText);
+
+  if (saidYesToCodm) {
+    rolesToAdd.push(ROLE_CODM);
+    console.log(`[Form] ${member.user.tag} answered yes to CODM`);
+  }
+  if (saidYesToTiktok) {
+    rolesToAdd.push(ROLE_TIKTOK);
+    console.log(`[Form] ${member.user.tag} answered yes to TikTok`);
+  }
+
+  try {
+    await member.roles.add(rolesToAdd, 'Form submission role assignment');
+    console.log(`[Roles] Added roles to ${member.user.tag}: ${rolesToAdd.join(', ')}`);
+
+    const data = loadData();
+    data[mentionedUserId] = Date.now();
+    saveData(data);
+    console.log(`[Timer] Started 3-day kick timer for ${member.user.tag}`);
+  } catch (err) {
+    console.error(`[Error] Failed to add roles to ${member.user.tag}:`, err.message);
+  }
+});
+
+client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+  const gainedVerified =
+    !oldMember.roles.cache.has(ROLE_VERIFIED) &&
+    newMember.roles.cache.has(ROLE_VERIFIED);
+
+  if (!gainedVerified) return;
+
+  if (newMember.roles.cache.has(ROLE_UNVERIFIED)) {
+    try {
+      await newMember.roles.remove(ROLE_UNVERIFIED, 'Member verified — removing unverified role');
+      console.log(`[Verified] Removed unverified role from ${newMember.user.tag}`);
+
+      const data = loadData();
+      delete data[newMember.id];
+      saveData(data);
+    } catch (err) {
+      console.error(`[Error] Failed to remove unverified role from ${newMember.user.tag}:`, err.message);
+    }
+  }
+});
+
+function extractMentionedUserId(message) {
+  if (message.mentions.users.size > 0) {
+    return message.mentions.users.first().id;
+  }
+
+  const mentionMatch = message.content.match(/<@!?(\d+)>/);
+  if (mentionMatch) return mentionMatch[1];
+
+  for (const embed of message.embeds) {
+    const embedText = (embed.description || '') + JSON.stringify(embed.fields || []);
+    const embedMatch = embedText.match(/<@!?(\d+)>/) || embedText.match(/"(\d{17,19})"/);
+    if (embedMatch) return embedMatch[1];
+  }
+
+  return null;
+}
+
+function scheduleKickChecks() {
+  checkAndKick();
+  setInterval(checkAndKick, 60 * 60 * 1000);
+}
+
+async function checkAndKick() {
+  const data = loadData();
+  const now = Date.now();
+  let changed = false;
+
+  for (const [userId, timestamp] of Object.entries(data)) {
+    const elapsed = now - timestamp;
+    if (elapsed < KICK_AFTER_MS) continue;
+
+    for (const [, guild] of client.guilds.cache) {
+      let member;
+      try {
+        member = await guild.members.fetch(userId);
+      } catch {
+        delete data[userId];
+        changed = true;
+        continue;
+      }
+
+      if (!member.roles.cache.has(ROLE_UNVERIFIED)) {
+        delete data[userId];
+        changed = true;
+        console.log(`[Kick Check] ${member.user.tag} no longer has unverified role — removing from tracker`);
+        continue;
+      }
+
+      try {
+        await member.kick('Still has unverified role after 3 days');
+        console.log(`[Kick] Kicked ${member.user.tag} for not completing verification within 3 days`);
+      } catch (err) {
+        console.error(`[Error] Failed to kick ${member.user.tag}:`, err.message);
+      }
+
+      delete data[userId];
+      changed = true;
+    }
+  }
+
+  if (changed) saveData(data);
+}
+
+client.login(process.env.DISCORD_TOKEN);

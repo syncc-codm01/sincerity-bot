@@ -1,0 +1,12 @@
+{
+  "name": "sincerity-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for role assignment and member management",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3"
+  }
+}

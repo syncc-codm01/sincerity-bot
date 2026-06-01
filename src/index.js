@@ -10,7 +10,7 @@ const ROLE_UNVERIFIED = '1510537467814740038';
 const ROLE_VERIFIED = '1509947656149925948';
 
 const DATA_FILE = path.join(__dirname, '..', 'data', 'unverified.json');
-const KICK_AFTER_MS = 10 * 1000;
+const KICK_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
 
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) return {};
@@ -288,7 +288,7 @@ function extractMentionedUserId(message) {
 
 function scheduleKickChecks() {
   checkAndKick();
-  setInterval(checkAndKick, 5 * 1000);
+  setInterval(checkAndKick, 60 * 60 * 1000);
 }
 
 function startCountdownUpdater() {
